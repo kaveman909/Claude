@@ -23,6 +23,7 @@ Only the Python standard library is used.
 import argparse
 import os
 import re
+import shutil
 import sys
 import time
 import urllib.error
@@ -247,6 +248,13 @@ def print_results(results: list[Result], q: Query, limit: int) -> None:
     if not results:
         print("No matching games. Try --top with a larger number or lower --min-votes.")
         return
+    if shutil.get_terminal_size((80, 24)).columns < 100:  # phones / narrow windows
+        for i, r in enumerate(results[:limit], 1):
+            g = r.game
+            print(f"{i:>2}. {g.name} ({g.year})")
+            print(f"    {r.best_pct:.0%} Best, {r.rec_pct:.0%} Rec, {r.votes} votes")
+            print(f"    rating {g.rating:.1f}, rank {g.rank or '-'}, {g.min_players}-{g.max_players} players")
+        return
     header = f"{'#':>3}  {label:>8}  {'Best':>5}  {'Rec':>5}  {'Votes':>5}  {'Rating':>6}  {'Rank':>5}  Game"
     print(header)
     print("-" * len(header))
@@ -258,12 +266,41 @@ def print_results(results: list[Result], q: Query, limit: int) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Token storage (env vars are awkward on iPhone, so a file works too)
+# --------------------------------------------------------------------------- #
+
+TOKEN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bgg_token")
+
+
+def load_token(cli_token: str | None) -> str | None:
+    if cli_token:
+        return cli_token
+    if os.environ.get("BGG_TOKEN"):
+        return os.environ["BGG_TOKEN"]
+    try:
+        with open(TOKEN_FILE) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
+
+
+def save_token(token: str) -> None:
+    try:
+        with open(TOKEN_FILE, "w") as f:
+            f.write(token.strip())
+        print(f"Saved token to {TOKEN_FILE}", file=sys.stderr)
+    except OSError as e:
+        print(f"warning: couldn't save token: {e}", file=sys.stderr)
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description="Find the best BGG games for a player count.")
-    p.add_argument("query", help='e.g. "Best games at 6 players" or "recommended for 3"')
+    p.add_argument("query", nargs="?",
+                   help='e.g. "Best games at 6 players"; omit it to be asked interactively')
     src = p.add_mutually_exclusive_group()
     src.add_argument("--top", type=int, default=200,
                      help="search BGG's top N ranked games (default 200)")
@@ -272,17 +309,34 @@ def main(argv=None) -> None:
     p.add_argument("--limit", type=int, default=15, help="how many results to show (default 15)")
     p.add_argument("--min-votes", type=int, default=20,
                    help="ignore games with fewer poll votes at that count (default 20)")
-    p.add_argument("--token", default=os.environ.get("BGG_TOKEN"),
-                   help="BGG API token (default: $BGG_TOKEN)")
+    p.add_argument("--token", help="BGG API token (default: $BGG_TOKEN or the saved .bgg_token file)")
+    p.add_argument("--save-token", metavar="TOKEN", help="save a BGG API token for future runs and exit")
     args = p.parse_args(argv)
+
+    if args.save_token:
+        save_token(args.save_token)
+        return
+
+    interactive = args.query is None
+    args.token = load_token(args.token)
+    if not args.token and interactive:
+        entered = input("BGG API token (from boardgamegeek.com/applications): ").strip()
+        if entered:
+            save_token(entered)
+            args.token = entered
+    if not args.token:
+        print("warning: no BGG token set; BGG's XML API will likely return 401.", file=sys.stderr)
+
+    if interactive:
+        args.query = input("Query (e.g. Best games at 6 players): ").strip()
+        user = input("BGG username to search their collection (blank = top games): ").strip()
+        if user:
+            args.user = user
 
     try:
         q = parse_query(args.query)
     except ValueError as e:
         p.error(str(e))
-
-    if not args.token:
-        print("warning: no BGG_TOKEN set; BGG's XML API will likely return 401.", file=sys.stderr)
 
     if args.ids:
         ids = [int(x) for x in args.ids.split(",") if x.strip()]
